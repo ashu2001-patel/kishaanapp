@@ -1,0 +1,32 @@
+const express = require('express');
+const router = express.Router();
+
+const {
+  registerUser,
+  loginUser,
+  getUserProfile,
+  updateUserProfile,
+  deleteUser,
+  logoutUser,
+  updateLocation,       // ← new
+  updateAvailability    // ← new
+} = require('../controllers/usercontroller');
+
+const { protect } = require('../middleware/auth');
+
+// Public routes
+router.post('/register', registerUser);
+router.post('/login',    loginUser);
+router.post('/logout',   logoutUser);
+
+// Protected user-profile routes
+router.get('/profile',    protect, getUserProfile);
+router.put('/profile',    protect, updateUserProfile);
+router.delete('/profile', protect, deleteUser);
+
+// Protected delivery‑man routes
+// (must pass :id of the delivery‑man you want to update)
+router.patch('/:id/location',     protect, updateLocation);
+router.patch('/:id/availability', protect, updateAvailability);
+
+module.exports = router;
