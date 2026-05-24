@@ -1,0 +1,14 @@
+﻿node_modules
+npm-debug.log
+.git
+.gitignore
+.env.local
+.env.example
+README.md
+dist
+coverage
+.DS_Store
+.env
+.env.production.local
+.env.development.local
+.env.test.local

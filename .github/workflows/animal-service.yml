@@ -1,0 +1,117 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Animal-Service CI/CD — Build → Push to ECR → Deploy to EC2
+#
+# Triggers ONLY when files inside animal_service/ change on the main branch.
+# Hot-swaps ONLY the animal-service container; user-service, payment-service
+# and the frontend keep running WITHOUT interruption.
+#
+# This service now also writes media metadata to DynamoDB and uploads to S3
+# under the raw/ prefix (Lambda then produces processed/ thumbnails), so the
+# deploy injects the DynamoDB + S3-prefix env vars below.
+#
+# Required GitHub Secrets (Settings → Secrets and variables → Actions):
+#   AWS_ACCESS_KEY_ID       – IAM key (ECR push + S3 + DynamoDB access)
+#   AWS_SECRET_ACCESS_KEY   – IAM secret
+#   ECR_URL                 – 713863945680.dkr.ecr.eu-north-1.amazonaws.com
+#   EC2_HOST                – EC2 public IP
+#   EC2_SSH_KEY             – full contents of your .pem file
+#   MONGO_URI               – MongoDB connection string
+#   JWT_SECRET              – JWT signing secret
+#   AWS_BUCKET              – S3 bucket name for animal media
+#
+# Non-secret config (hard-coded below, matching the service .env):
+#   AWS_REGION=eu-north-1   DYNAMODB_REGION=eu-north-1
+#   DYNAMODB_TABLE=rural_media   AWS_BUCKET_RAW_PREFIX=raw
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Deploy Animal Service
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "animal_service/**"
+      - ".github/workflows/animal-service.yml"
+
+env:
+  AWS_REGION: eu-north-1
+  ECR_REPOSITORY: animal-service
+
+jobs:
+  build-and-deploy:
+    name: Build & deploy animal-service
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repository if missing
+        run: |
+          aws ecr describe-repositories --repository-names $ECR_REPOSITORY \
+            || aws ecr create-repository --repository-name $ECR_REPOSITORY
+
+      # Push two tags:
+      #   :latest — what EC2 pulls
+      #   :<sha>  — permanent tag for rollback (e.g. :a1b2c3d)
+      - name: Build, tag and push image
+        run: |
+          IMAGE=${{ secrets.ECR_URL }}/$ECR_REPOSITORY
+          docker build -t $IMAGE:latest -t $IMAGE:${{ github.sha }} ./animal_service
+          docker push $IMAGE:latest
+          docker push $IMAGE:${{ github.sha }}
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          timeout: 60s
+          command_timeout: 10m
+          script: |
+            set -e
+            echo "── Rural Company — animal-service deploy (${{ github.sha }}) ──"
+
+            ECR_IMAGE="${{ secrets.ECR_URL }}/animal-service:latest"
+
+            aws ecr get-login-password --region eu-north-1 | \
+              docker login --username AWS --password-stdin ${{ secrets.ECR_URL }}
+
+            # Pull BEFORE stopping the old container so downtime is just the swap.
+            docker pull $ECR_IMAGE
+
+            docker stop animal-service || true
+            docker rm   animal-service || true
+
+            docker run -d --restart unless-stopped \
+              --name animal-service \
+              -p 5001:5001 \
+              -e PORT=5001 \
+              -e MONGO_URI="${{ secrets.MONGO_URI }}" \
+              -e JWT_SECRET="${{ secrets.JWT_SECRET }}" \
+              -e AWS_REGION="eu-north-1" \
+              -e AWS_ACCESS_KEY="${{ secrets.AWS_ACCESS_KEY_ID }}" \
+              -e AWS_SECRET_KEY="${{ secrets.AWS_SECRET_ACCESS_KEY }}" \
+              -e AWS_BUCKET="${{ secrets.AWS_BUCKET }}" \
+              -e AWS_BUCKET_RAW_PREFIX="raw" \
+              -e DYNAMODB_REGION="eu-north-1" \
+              -e DYNAMODB_TABLE="rural_media" \
+              $ECR_IMAGE
+
+            docker image prune -f
+            echo "✅ animal-service deployed"
+            docker ps --filter "name=animal-service" \
+              --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"

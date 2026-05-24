@@ -1,0 +1,110 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# User-Service CI/CD — Build → Push to ECR → Deploy to EC2
+#
+# Triggers ONLY when files inside User_service/ change on the main branch.
+# Hot-swaps ONLY the user-service container; animal-service, payment-service
+# and the frontend keep running WITHOUT interruption.
+#
+# Required GitHub Secrets (Settings → Secrets and variables → Actions):
+#   AWS_ACCESS_KEY_ID       – IAM key with ECR push permission
+#   AWS_SECRET_ACCESS_KEY   – IAM secret
+#   ECR_URL                 – 713863945680.dkr.ecr.eu-north-1.amazonaws.com
+#   EC2_HOST                – EC2 public IP
+#   EC2_SSH_KEY             – full contents of your .pem file
+#   MONGO_URI               – MongoDB connection string
+#   JWT_SECRET              – JWT signing secret
+#   GOOGLE_CLIENT_ID        – Google OAuth client ID
+#   TWILIO_ACCOUNT_SID      – Twilio account SID
+#   TWILIO_AUTH_TOKEN       – Twilio auth token
+#   TWILIO_MESSAGING_SID    – Twilio messaging service SID
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Deploy User Service
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "User_service/**"
+      - ".github/workflows/user-service.yml"
+
+env:
+  AWS_REGION: eu-north-1
+  ECR_REPOSITORY: user-service
+
+jobs:
+  build-and-deploy:
+    name: Build & deploy user-service
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Create ECR repository if missing
+        run: |
+          aws ecr describe-repositories --repository-names $ECR_REPOSITORY \
+            || aws ecr create-repository --repository-name $ECR_REPOSITORY
+
+      # Push two tags:
+      #   :latest — what EC2 pulls
+      #   :<sha>  — permanent tag for rollback (e.g. :a1b2c3d)
+      - name: Build, tag and push image
+        run: |
+          IMAGE=${{ secrets.ECR_URL }}/$ECR_REPOSITORY
+          docker build -t $IMAGE:latest -t $IMAGE:${{ github.sha }} ./User_service
+          docker push $IMAGE:latest
+          docker push $IMAGE:${{ github.sha }}
+
+      - name: Deploy to EC2
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ec2-user
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          timeout: 60s
+          command_timeout: 10m
+          script: |
+            set -e
+            echo "── Rural Company — user-service deploy (${{ github.sha }}) ──"
+
+            ECR_IMAGE="${{ secrets.ECR_URL }}/user-service:latest"
+
+            aws ecr get-login-password --region eu-north-1 | \
+              docker login --username AWS --password-stdin ${{ secrets.ECR_URL }}
+
+            # Pull BEFORE stopping the old container so downtime is just the swap.
+            docker pull $ECR_IMAGE
+
+            docker stop user-service || true
+            docker rm   user-service || true
+
+            docker run -d --restart unless-stopped \
+              --name user-service \
+              -p 5000:5000 \
+              -e PORT=5000 \
+              -e MONGO_URI="${{ secrets.MONGO_URI }}" \
+              -e JWT_SECRET="${{ secrets.JWT_SECRET }}" \
+              -e GOOGLE_CLIENT_ID="${{ secrets.GOOGLE_CLIENT_ID }}" \
+              -e TWILIO_ACCOUNT_SID="${{ secrets.TWILIO_ACCOUNT_SID }}" \
+              -e TWILIO_AUTH_TOKEN="${{ secrets.TWILIO_AUTH_TOKEN }}" \
+              -e TWILIO_MESSAGING_SID="${{ secrets.TWILIO_MESSAGING_SID }}" \
+              -e CORS_ORIGINS="http://${{ secrets.EC2_HOST }}" \
+              $ECR_IMAGE
+
+            docker image prune -f
+            echo "✅ user-service deployed"
+            docker ps --filter "name=user-service" \
+              --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"

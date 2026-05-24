@@ -1,0 +1,42 @@
+# dependencies
+
+node_modules/
+
+# environment variables
+
+.env
+.env.*
+
+# logs
+
+logs
+*.log
+npm-debug.log*
+
+# OS files
+
+.DS_Store
+Thumbs.db
+
+# build
+
+dist/
+build/
+
+# coverage
+
+coverage/
+
+# Docker
+
+docker-compose.override.yml
+
+# IDE
+
+.vscode/
+.idea/
+
+# temp
+
+*.tmp
+*.swp
