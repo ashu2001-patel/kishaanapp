@@ -28,3 +28,8 @@ Thumbs.db
 dist/
 build/
 coverage/
+
+# Docker image artifacts (never commit saved images)
+*.tar
+*.tar.gz
+*.tgz
